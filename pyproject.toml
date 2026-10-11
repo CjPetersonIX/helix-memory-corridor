@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "helix-memory-corridor"
+version = "0.2.0"
+description = "Helix Memory Corridor: 4-arm hybrid memory recall for AI agents (semantic + BM25 + PPR graph + temporal, RRF fusion, bi-temporal validity, multiplicative re-ranking)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["memory", "retrieval", "rag", "hybrid-search", "rrf"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "rank-bm25>=0.2.2",
+    "dateparser>=1.1.0",
+    "networkx>=3.0",
+]
+
+[project.optional-dependencies]
+semantic = [
+    "sentence-transformers>=2.2",
+    "chromadb>=0.4",
+    "torch",  # CPU build is fine; GPU optional
+]
+dev = [
+    "pytest>=7",
+]
+
+[project.urls]
+Homepage = "https://github.com/CjPetersonIX/helix-memory-corridor"
+Repository = "https://github.com/CjPetersonIX/helix-memory-corridor"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["helix_memory*"]

@@ -1,0 +1,13 @@
+# Optional: semantic (vector) arm dependencies.
+# Install: pip install -r requirements-semantic.txt
+# ~2GB download (torch + transformers + model). CPU-only torch is sufficient.
+# Without these, recall() still works with BM25 + graph + temporal arms.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+sentence-transformers==6.1.0
+chromadb==1.5.9
+huggingface_hub==1.33.0
+tokenizers==0.23.3
+numpy==2.5.3
+scipy==1.18.1
