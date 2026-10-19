@@ -10,7 +10,8 @@ Two jobs:
 """
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 try:
     import dateparser
@@ -143,15 +144,61 @@ def extract_temporal_window(
     return None
 
 
-def date_from_qpulse_path(path: str) -> date | None:
-    """Extract the date from a qpulse filename like 2026-10-10-1030-hourly.md."""
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", path)
-    if m:
+def normalize_timestamp(value, *, field_name: str = "timestamp") -> datetime | None:
+    """Normalize ISO/date/datetime values to an aware UTC datetime.
+
+    Date-only values mean midnight UTC. Legacy naive datetime values also use
+    UTC, never the host's local timezone. Invalid values raise instead of
+    accidentally falling back to the present.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, date):
+        parsed = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, str) and value.strip():
         try:
-            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            return None
-    return None
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(f"Invalid {field_name}: expected an ISO timestamp") from exc
+    else:
+        raise ValueError(f"Invalid {field_name}: expected a date or ISO timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def timestamp_from_path(path: str) -> datetime | None:
+    """Read YYYY-MM-DD[-HHMM[-SS]] from a filename, with UTC fallback.
+
+    A timezone-aware ISO timestamp in the filename is preferred when present.
+    Plain dates and legacy qpulse filenames have no timezone and are treated
+    as UTC. Directory names are not used as a document's timestamp. A filename
+    that contains a date but an invalid time raises ValueError.
+    """
+    name = Path(path).name
+    iso = re.search(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?",
+        name,
+    )
+    if iso:
+        return normalize_timestamp(iso.group(), field_name="filename timestamp")
+    match = re.search(
+        r"(?<!\d)(\d{4}-\d{2}-\d{2})(?:-(\d{4})(?:-(\d{2}))?)?(?!\d)",
+        name,
+    )
+    if not match:
+        return None
+    day, hhmm, seconds = match.groups()
+    value = day if hhmm is None else f"{day}T{hhmm[:2]}:{hhmm[2:]}:{seconds or '00'}"
+    return normalize_timestamp(value, field_name="filename timestamp")
+
+
+def date_from_qpulse_path(path: str) -> date | None:
+    """Compatibility view of :func:`timestamp_from_path`, retaining its date."""
+    timestamp = timestamp_from_path(path)
+    return timestamp.date() if timestamp else None
 
 
 def filter_by_window(
