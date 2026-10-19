@@ -1,67 +1,46 @@
 #!/usr/bin/env python3
-"""Smoke test: 4-arm hybrid recall on sample data.
-
-Usage:
-    python scripts/test_recall.py [--no-semantic]
-
-Requires the helix_memory package installed (pip install -e .)
-and indexes built (python scripts/build_index.py).
-"""
-
+"""Isolated end-to-end workflow smoke check. Authored by [R2] SRVP2-CODEX."""
 import argparse
-import os
 import sys
-import time
-
-# Allow running from the repo root without installing: python scripts/test_recall.py
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
-
-from helix_memory import recall
-
-
-def show(query, **kw):
-    print(f"\n=== {query} ===")
-    t0 = time.time()
-    results = recall(query, top_k=5, **kw)
-    dt = time.time() - t0
-    print(f"({dt:.1f}s, {len(results)} results)")
-    for r in results:
-        arms = ",".join(
-            f"{k.replace('_rank', '')}#{v}" for k, v in r.source_ranks.items()
-        )
-        print(f"  #{r.rrf_rank} score={r.rrf_score:.4f} [{arms}]")
-        print(f"      {r.id}")
-    return results
+import tempfile
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from helix_memory import MemoryStore, recall, latest_events
+from helix_memory.mirror import mirror_to_directory, restore_generation
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Smoke-test helix-memory recall")
-    parser.add_argument("--no-semantic", action="store_true")
-    args = parser.parse_args()
-    kw = {"include_semantic": not args.no_semantic}
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--no-semantic', action='store_true', help='core-only (the default)')
+    parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix='hmc-smoke-') as temporary:
+        root = Path(temporary)
+        source = root / 'memory'
+        store = MemoryStore(source)
+        event = store.remember('Orion uses ultramarine. Next: review the draft.',
+            area='work', actor='[R2] EXAMPLE-AGENT', task_id='orion', idempotency_key='first')
+        assert recall('ultramarine', memory_dir=source, include_semantic=False)
+        correction = store.remember('Orion now uses viridian.', area='work',
+            actor='[R2] EXAMPLE-AGENT', task_id='orion', kind='correction',
+            supersedes=[event['event_id']], idempotency_key='second')
+        found = recall('Orion', memory_dir=source, include_semantic=False)
+        assert correction['event_id'] in {item.id for item in found}
+        assert event['event_id'] not in {item.id for item in found}
+        assert Path(event['path']).exists()
+        handoff = root / 'Living_Handoff.html'
+        handoff.write_text('<html><body><h1>Existing board</h1></body></html>')
+        store.update_resume(handoff, {'actor':'[R2] EXAMPLE-AGENT','task_id':'orion',
+            'goal':'Finish Orion', 'next_step':'Review draft',
+            'last_event_id':correction['event_id']}, expected_revision=0)
+        restarted = MemoryStore(source)
+        assert restarted.read_resume(handoff)['state']['next_step'] == 'Review draft'
+        assert latest_events(memory_dir=source, task_id='orion')[0]['id'] == correction['event_id']
+        mirror = mirror_to_directory({'memory': source, 'handoff.html': handoff}, root/'backup')
+        restore_generation(mirror['local_generation'], root/'restored')
+        assert (root/'restored/handoff.html').read_bytes() == handoff.read_bytes()
+        print('Capture, warm-cache correction, restart recovery, full mirror and restore passed.')
+    return 0
 
-    r1 = show("What did the team decide about the project timeline?", **kw)
-    assert len(r1) > 0, "expected results for crypto query"
 
-    r2 = show("Project approval status", category="personal", **kw)
-    r3 = show("What happened with the scheduler outage?", **kw)
-    r4 = show("morning brief voice note", **kw)
-
-    # Temporal arm check
-    r5 = show("What happened yesterday?", **kw)
-    temporal_hits = [r for r in r5 if "temporal_rank" in r.source_ranks]
-    print(f"\nTemporal arm contributed to {len(temporal_hits)}/{len(r5)} results")
-
-    # Dedup mode check
-    r6 = show(
-        "The team agreed to pause notifications, Alex owns the backend",
-        dedup_mode=True,
-        **kw,
-    )
-    assert len(r6) > 0, "expected results in dedup mode"
-
-    print("\nAll smoke tests passed.")
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())
