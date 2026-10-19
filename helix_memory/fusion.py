@@ -6,6 +6,40 @@ any external dependencies.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+
+def _freshness(result):
+    """Compare available provenance instead of trusting arm priority as truth."""
+    for key in ("source_modified_at", "recorded_at", "timestamp", "modified_at", "valid_from"):
+        value = result.metadata.get(key)
+        if value is None:
+            continue
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            continue
+    return float("-inf")
+
+
+def _preferred_result(existing, incoming):
+    """Keep text and metadata from the same freshest available source snapshot.
+
+    This is still only a tie-breaker: callers must hydrate the final candidates
+    from their authoritative source snapshot before displaying them.
+    """
+    old_time, new_time = _freshness(existing), _freshness(incoming)
+    if new_time != old_time:
+        return incoming if new_time > old_time else existing
+    # On an equal snapshot prefer complete lexical text to semantic excerpts.
+    if incoming.source == "bm25" and existing.source != "bm25":
+        return incoming
+    return existing
 
 
 @dataclass
@@ -88,6 +122,8 @@ def reciprocal_rank_fusion(
             doc_id = retrieval.id
             if doc_id not in first_seen:
                 first_seen[doc_id] = retrieval
+            else:
+                first_seen[doc_id] = _preferred_result(first_seen[doc_id], retrieval)
             if doc_id not in rrf_scores:
                 rrf_scores[doc_id] = 0.0
                 source_ranks[doc_id] = {}
@@ -155,7 +191,10 @@ def interleave_fusion(
         )
         for rank, retrieval in enumerate(results, start=1):
             doc_id = retrieval.id
-            first_seen.setdefault(doc_id, retrieval)
+            if doc_id in first_seen:
+                first_seen[doc_id] = _preferred_result(first_seen[doc_id], retrieval)
+            else:
+                first_seen[doc_id] = retrieval
             source_ranks.setdefault(doc_id, {})[f"{source_name}_rank"] = rank
             arm = arm_scores.setdefault(doc_id, ArmScores())
             if source_name == "semantic":
