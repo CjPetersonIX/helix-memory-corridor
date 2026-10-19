@@ -1,12 +1,5 @@
-# helix-memory-enhanced pinned dependencies
-# Install: pip install -r requirements.txt
-# For the semantic (vector) arm, also install: pip install -r requirements-semantic.txt
-
-# --- core (always required) ---
-rank-bm25==0.2.2
-dateparser==1.4.3
-python-dateutil==2.9.0.post0
-pytz==2026.5
-tzlocal==5.4.4
-regex==2026.9.29
-networkx==3.6.1
+# Core compatibility ranges match pyproject.toml; resolver selects Python-compatible versions.
+# Preferred install: python -m pip install .
+rank-bm25>=0.2.2
+dateparser>=1.1.0
+networkx>=3.0

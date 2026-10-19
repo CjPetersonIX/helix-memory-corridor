@@ -36,6 +36,7 @@ def check(name, cond, detail=""):
     else:
         FAIL.append(name)
         print(f"  FAIL {name} {detail}")
+        raise AssertionError(f"{name}: {detail}")
 
 
 # ---------------------------------------------------------------- validity
@@ -57,6 +58,7 @@ def test_validity_supersession():
                 "this supersedes the earlier figure."
             ),
             "date": date(2026, 10, 10),
+            "supersedes": ["memory/helix/05-personal/qpulse/2026-10-08-0900-am.md#s1"],
         },
         {
             "id": "memory/helix/05-personal/qpulse/2026-10-09-1200-pm.md#s3",
@@ -70,7 +72,7 @@ def test_validity_supersession():
     new_id = docs[1]["id"]
     unrelated_id = docs[2]["id"]
 
-    check("old window closed", v[old_id]["valid_until"] == "2026-10-10",
+    check("old window closed", v[old_id]["valid_until"] == "2026-10-10T00:00:00+00:00",
           f"got {v[old_id]['valid_until']}")
     check("old superseded_by set", v[old_id]["superseded_by"] == new_id)
     check("new still open", v[new_id]["valid_until"] is None)
@@ -220,39 +222,24 @@ def test_rerank_undated_neutral():
 # ---------------------------------------------------------------- integration
 
 def test_integration():
-    print("\n[integration] recall() with enhancements on real data")
-    import importlib
-    recall_mod = importlib.import_module("helix_memory.recall")
-
-    # Reset caches so the validity index builds fresh
-    recall_mod._validity = None
-
-    r = recall_mod.recall("Project approval status", category="personal",
-                          top_k=5, include_semantic=False)
-    check("recall returns results", len(r) > 0)
-    if r:
-        check("final_score stamped",
-              all("final_score" in c.metadata for c in r))
-        graph_hits = [c for c in r if "graph_rank" in c.source_ranks]
-        methods = {c.metadata.get("graph_method") for c in graph_hits}
-        print(f"  graph methods used: {methods}")
-        check("PPR used by graph arm", "ppr" in methods, f"got {methods}")
-
-    # as_of in the past should filter out docs dated after it
-    r_now = recall_mod.recall("scheduler outage", top_k=20,
-                              include_semantic=False)
-    r_past = recall_mod.recall("scheduler outage", top_k=20,
-                               include_semantic=False, as_of="2020-01-01")
-    check("as_of filters future docs", len(r_past) <= len(r_now),
-          f"now={len(r_now)} past={len(r_past)}")
-
-    # rerank=False preserves RRF order
-    r_plain = recall_mod.recall("Project approval status",
-                                category="personal", top_k=5,
-                                include_semantic=False, rerank=False)
-    rrf_order = [c.rrf_rank for c in r_plain]
-    check("rerank=False keeps RRF order",
-          rrf_order == sorted(rrf_order), f"got {rrf_order}")
+    print("\n[integration] fresh isolated memory")
+    import tempfile
+    from pathlib import Path
+    from helix_memory import MemoryStore, recall
+    with tempfile.TemporaryDirectory(prefix="hmc-enhancement-") as temporary:
+        root = Path(temporary) / "memory"
+        store = MemoryStore(root)
+        event = store.remember("Orion approval is pending. Review the draft next.",
+            area="personal", actor="[R2] EXAMPLE-AGENT", task_id="orion")
+        result = recall("Orion approval", memory_dir=root, category="personal", include_semantic=False)
+        check("recall returns exact event", event["event_id"] in {c.id for c in result})
+        check("final_score stamped", all("final_score" in c.metadata for c in result))
+        check("as_of excludes future event", not recall("Orion approval", memory_dir=root,
+              category="personal", include_semantic=False, as_of="2020-01-01"))
+        plain = recall("Orion approval", memory_dir=root, category="personal",
+                       include_semantic=False, rerank=False)
+        scores = [c.rrf_score for c in plain]
+        check("rerank=False keeps RRF score order", scores == sorted(scores, reverse=True))
 
 
 def main():

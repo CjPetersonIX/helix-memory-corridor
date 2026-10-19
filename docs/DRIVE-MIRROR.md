@@ -1,165 +1,107 @@
-# Google Drive as Your Memory Mirror
+# Verified memory mirror and recovery
 
-This guide shows you how to set up Google Drive as a one-to-one backup
-of your local memory files. Your local folder stays the working copy.
-Drive holds an identical mirror. If your computer dies, your memories
-survive.
+Authored by [R2] SRVP2-CODEX. The working source and verified remote generation
+have separate receipts. This is an explicit API/CLI operation, not a claim that
+Drive access, a schedule, or an automatic chat hook is already installed.
 
-## The idea
+## Define the whole corpus
 
-```
-Local:  ~/memory/
-            ├── work/
-            ├── personal/
-            └── journal.md
-
-Drive:  My Drive/Memory/
-            ├── work/          (identical copy)
-            ├── personal/      (identical copy)
-            └── journal.md     (identical copy)
-```
-
-Every file in your local memory folder has exactly one matching file
-in Drive. Same names, same folder structure. When you update a local
-file, you push the change to Drive. When you need to restore, you pull
-from Drive.
-
-## Setup
-
-### 1. Create the Drive folder
-
-1. Go to [drive.google.com](https://drive.google.com)
-2. Click **New** → **New folder**
-3. Name it `Memory`
-4. Note the folder ID from the URL:
-   `https://drive.google.com/drive/folders/1ABC123xyz...`
-   The part after `/folders/` is your folder ID. Save it.
-
-### 2. Install rclone (free, open source)
-
-rclone syncs local folders to cloud storage from the command line.
-
-**Mac:**
-```bash
-brew install rclone
-```
-
-**Linux:**
-```bash
-sudo apt install rclone
-# or
-curl https://rclone.org/install.sh | sudo bash
-```
-
-**Windows:** Download from [rclone.org](https://rclone.org/downloads/)
-
-### 3. Connect rclone to Google Drive
+Map every canonical file/directory to its intended relative path. A file omitted
+from this mapping is not backed up. Include the memory root, the one existing
+handoff, its authoritative planning state, and required memory configuration.
+Keep credentials in the approved vault. Preserve existing Drive copies before
+any layout migration; do not replace them with this example layout blindly.
 
 ```bash
-rclone config
+hmc mirror \
+  --source memory=/path/to/memory \
+  --source workspace/user/files/Living_Handoff.html=/path/Living_Handoff.html \
+  --source planning/board.json=/path/board.json \
+  --destination /separate/location/memory-backup
 ```
 
-Follow the prompts:
-1. Type `n` for new remote
-2. Name it `gdrive`
-3. Choose `drive` (Google Drive)
-4. Leave client ID and secret blank (press Enter)
-5. Choose `1` for full access
-6. Leave root folder ID blank
-7. When asked "Use auto config?", type `y`
-8. Your browser opens. Sign in to Google and click **Allow**.
-9. Type `y` to confirm, then `q` to quit.
+The layout is:
 
-Test it:
-```bash
-rclone lsd gdrive:
-```
-You should see your Drive folders listed.
-
-### 4. Do the first sync
-
-```bash
-# Replace FOLDER_ID with your Memory folder ID from step 1
-rclone sync ~/memory gdrive:Memory --drive-root-folder-id FOLDER_ID -v
+```text
+memory-backup/
+  generations/<unique-id>/
+    tree/<exact mapped relative paths>
+    manifest.json
+  current.json
+  receipts/<timestamp-id>.json
 ```
 
-This copies everything up. The first run takes a while depending on
-how many files you have.
+Each generation contains an exact complete tree; history remains in earlier
+generations. Removing or renaming a source never removes its previous backup.
+Current is only a pointer to a verified generation, not a second memory source.
 
-## Daily use
+The implementation detects changed sources during capture, refuses symlinks and
+path traversal, writes files exclusively, and verifies every path, byte count,
+and SHA256 hash. A mutation/failed check leaves current unchanged. Keep the
+backup/outbox outside all source roots to prevent recursive self-copy.
 
-### Push changes to Drive
+## Google Drive through existing rclone configuration
 
-After you update your memory files, mirror the changes:
+Use an already configured, private, least-privilege rclone Drive remote. This
+library never discovers credentials, changes sharing, or performs OAuth setup.
+Check the configured destination yourself before sending any private data.
 
 ```bash
-rclone sync ~/memory gdrive:Memory --drive-root-folder-id FOLDER_ID
+hmc mirror \
+  --source memory=/path/to/memory \
+  --source workspace/user/files/Living_Handoff.html=/path/Living_Handoff.html \
+  --rclone-remote gdrive:Memory/seat-example \
+  --state-dir /separate/location/mirror-outbox
 ```
 
-**Important:** `sync` makes Drive match local exactly. Files you
-deleted locally get deleted on Drive too. This is what you want for
-a true mirror, but be careful.
+It captures locally, uploads an immutable generation using `rclone copy`,
+downloads that complete generation into a separate temporary directory, and
+checks its manifest and bytes. Only then can it advance and read back the
+remote current pointer. It never invokes `sync`, `delete`, or `purge`.
 
-If you want to be safe and never delete from Drive automatically,
-use `copy` instead:
+`remote_verified` means the returned generation was read back successfully.
+`remote_pending` means remote verification is incomplete; retain the local
+generation and retry that exact generation. Do not claim mirrored from an
+upload exit code. See receipt fields for whether the current pointer advanced;
+an older verified retry must not replace a newer current generation.
+
+```python
+from helix_memory.mirror import retry_to_rclone
+receipt = retry_to_rclone('/outbox/generations/GENERATION-ID',
+                          'gdrive:Memory/seat-example')
+```
+
+One seat/remote must have one configured writer/state directory. Local locks do
+not coordinate different machines. Do not share the same remote writer path
+across independent brains or replicas without a separate coordinator.
+
+## Databases and MemPalace
+
+Raw `.db`, `.sqlite`, `.sqlite3`, SQLite-header, WAL and SHM files are refused.
+Copying a changing database plus vector files is not a consistent backup. Use
+its supported export or quiescence procedure first and include that output.
+An isolated SQLite database can be exported through sqlite3's supported backup
+or iterdump API; a full Chroma/MemPalace export needs its own verified contract.
+A SQL text export can be mirrored byte-for-byte, but does not by itself prove a
+complete Chroma restoration. No transparent live MemPalace backup is claimed.
+
+## Restore rehearsal
 
 ```bash
-rclone copy ~/memory gdrive:Memory --drive-root-folder-id FOLDER_ID
+hmc verify /backup/generations/GENERATION-ID
+hmc restore /backup/generations/GENERATION-ID /new-empty/restore-check
 ```
 
-### Pull from Drive (restore)
+Restoration refuses a nonempty target and verifies all restored hashes. Start
+in a separate directory; never restore over live files. Verify the generation,
+configuration, handoff state, and semantic database export before a deliberate
+cutover. Keep the current working copy and all history available.
 
-If you lose your local files:
+## Integration and cadence
 
-```bash
-rclone sync gdrive:Memory ~/memory --drive-root-folder-id FOLDER_ID
-```
-
-### Automate it
-
-**Mac/Linux with cron** — sync every hour:
-
-```bash
-crontab -e
-```
-
-Add this line (replace FOLDER_ID):
-
-```
-0 * * * * /usr/bin/rclone sync ~/memory gdrive:Memory --drive-root-folder-id FOLDER_ID --log-file ~/.rclone-memory.log
-```
-
-**Manual habit** — if you prefer control, just run the sync command
-at the end of each day.
-
-## Tips
-
-- **Exclude the index cache.** The Helix Memory Corridor builds its
-  search indexes locally in `~/.helix-memory/`. Don't sync that folder.
-  It's rebuilt automatically. Only sync your source markdown files.
-
-- **Drive file limits.** Google Drive handles tens of thousands of
-  files fine. If you have more than ~100k files, consider splitting
-  into multiple Drive folders.
-
-- **Version history is free backup.** Google Drive keeps version
-  history on every file. Even if a bad sync overwrites something,
-  you can restore the previous version from the Drive web UI:
-  right-click the file → **Manage versions**.
-
-- **Sharing.** If you want someone else to read your memories
-  (not edit), share the Drive folder with "Viewer" permission.
-  They get a read-only copy without touching your local files.
-
-## Troubleshooting
-
-**"Failed to get folder ID"** — Double-check the folder ID from the
-Drive URL. It must be the Memory folder, not a parent.
-
-**"Token expired"** — Run `rclone config`, choose your `gdrive`
-remote, and re-authenticate.
-
-**Sync is slow** — Add `--transfers 8` to run 8 uploads in parallel:
-```bash
-rclone sync ~/memory gdrive:Memory --drive-root-folder-id FOLDER_ID --transfers 8
-```
+After a durable event capture, enqueue a mirror operation. Before compaction,
+verify the event and resume cursor are saved. A local readback can succeed while
+Drive is offline: retain pending receipts and show last verified remote time.
+A periodic reconciliation checks backlog; an hourly job alone does not protect
+a decision made ten minutes ago. Installing that host integration/schedule is a
+separate deployment step. No cron is created by installing this package.

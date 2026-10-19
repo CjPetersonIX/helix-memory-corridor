@@ -1,7 +1,7 @@
 """
 Helix Memory Corridor: 4-arm hybrid memory recall for AI agent memory.
 
-Searches ~/memory/helix/ using four parallel retrieval arms fused with
+Searches the explicitly selected memory corpus using retrieval arms fused with
 Reciprocal Rank Fusion:
 
   1. semantic — sentence-transformers + ChromaDB vector search
@@ -19,8 +19,8 @@ Plus:
 Quickstart:
     from helix_memory import recall, build_index
 
-    build_index()                      # index ~/memory/helix/ (first run)
-    results = recall("What did IX decide about crypto?")
+    build_index(memory_dir="~/memory")  # optional explicit derived-index build
+    results = recall("What did the team decide about the project?")
     for r in results:
         print(r.rrf_rank, f"{r.rrf_score:.4f}", r.id)
 
@@ -43,6 +43,8 @@ from .fusion import (
 )
 from .ppr_ranking import ppr_rank
 from .recall import recall, rebuild_all
+from .recall import latest_events
+from .memory_store import MemoryStore
 from .temporal_validity import (
     build_validity_index,
     filter_valid,
@@ -54,12 +56,14 @@ from .temporal_validity import (
 # Friendly alias: build_index() is the primary name for (re)building indexes.
 build_index = rebuild_all
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "recall",
     "build_index",
     "rebuild_all",
+    "latest_events",
+    "MemoryStore",
     "reciprocal_rank_fusion",
     "interleave_fusion",
     "cap_per_source",

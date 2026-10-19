@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helix-memory-corridor"
-version = "0.2.0"
-description = "Helix Memory Corridor: 4-arm hybrid memory recall for AI agents (semantic + BM25 + PPR graph + temporal, RRF fusion, bi-temporal validity, multiplicative re-ranking)"
+version = "0.3.0"
+description = "Durable agent memory capture, fresh hybrid recall, explicit corrections, resume state, and verified non-deleting mirrors"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,7 +13,7 @@ keywords = ["memory", "retrieval", "rag", "hybrid-search", "rrf"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+    "Operating System :: POSIX",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 dependencies = [
@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+graph = [
+    "scipy>=1.10",
+]
 semantic = [
     "sentence-transformers>=2.2",
     "chromadb>=0.4",
@@ -32,6 +35,10 @@ dev = [
     "pytest>=7",
 ]
 
+[project.scripts]
+hmc = "helix_memory.cli:main"
+helix-memory-corridor = "helix_memory.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/CjPetersonIX/helix-memory-corridor"
 Repository = "https://github.com/CjPetersonIX/helix-memory-corridor"
@@ -39,3 +46,7 @@ Repository = "https://github.com/CjPetersonIX/helix-memory-corridor"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["helix_memory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

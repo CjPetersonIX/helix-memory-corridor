@@ -1,3 +1,9 @@
+> **Historical review, preserved:** this October 11 review describes the prior
+> release, not the current repair. New capture/mirror code has explicit write and
+> optional network effects; dependency ranges and runtime paths have changed.
+> Its previous PASS is not a fresh security assurance. See docs/INTEGRATION.md
+> and current regression evidence. Added by [R2] SRVP2-CODEX, 2026-10-19.
+
 # Security Review — Helix Memory Corridor Public Release
 
 Date: 2026-10-11

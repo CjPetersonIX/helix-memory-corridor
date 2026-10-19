@@ -1,206 +1,197 @@
-"""
-Bi-temporal validity windows for HELIX memories (adapted from Graphiti/Zep).
+"""Explicit, timezone-aware validity for preserved HELIX memory events.
 
-Every memory gets a validity window:
-  - valid_from:  when the fact became true (doc date from qpulse path)
-  - valid_until: when it was superseded (None = still current)
-
-When a new memory contradicts or supersedes an old one, we CLOSE the old
-window instead of just appending. Queries default to as_of=now, so
-corrections automatically hide superseded facts — "latest truth" becomes a
-first-class query instead of a recency heuristic.
-
-Supersede detection (heuristic, no LLM):
-  A new doc supersedes older docs when ALL of:
-    1. same HELIX division,
-    2. shares 2+ entities with the older doc,
-    3. its text contains a correction keyword
-       ("corrected", "supersedes", "replaces", "updated", "was wrong", ...)
-
-This matches our correction-heavy workflow: "IX corrected X on Oct 10"
-closes the window on the earlier (now-wrong) version of X.
-
-Storage: <index_dir>/validity.json
-  {doc_id: {"valid_from": "2026-10-10"|null,
-            "valid_until": "2026-10-12"|null,
-            "superseded_by": doc_id|null}}
+Only an explicit ``supersedes`` event ID closes an earlier validity window.
+Entity overlap and words such as "updated" never establish that authority.
+``recorded_at`` describes when a record entered memory; ``valid_from`` is when
+its claim became effective. ``known_at`` optionally reconstructs the knowledge
+available at a particular moment. Authored by [R2] SRVP2-CODEX.
 """
 
 import json
 import os
-from datetime import date, datetime
+import tempfile
+from datetime import date, datetime, timezone
+
+from .temporal_filter import normalize_timestamp
 
 INDEX_DIR = os.path.expanduser("~/.helix-memory")
 VALIDITY_PATH = os.path.join(INDEX_DIR, "validity.json")
 
-# Correction keywords: a doc containing one of these (case-insensitive)
-# is a candidate for superseding older memories it overlaps with.
-CORRECTION_KEYWORDS = [
-    "corrected",
-    "correction",
-    "supersedes",
-    "superseded",
-    "supersede",
-    "replaces",
-    "replaced",
-    "replacement",
-    "updated",
-    "update:",
-    "was wrong",
-    "were wrong",
-    "is wrong",
-    "fix:",
-    "fixed",
-    "amended",
-    "amendment",
-    "retracted",
-    "retraction",
-    "override",
-    "overrides",
-    "overridden",
-    "no longer",
-    "instead of",
-    "disregard",
-]
-
-
-def _has_correction_signal(text: str) -> bool:
-    t = text.lower()
-    return any(kw in t for kw in CORRECTION_KEYWORDS)
-
 
 def _as_date(value) -> date | None:
-    """Normalize date/datetime/ISO-string/None to a date or None."""
+    """Legacy date view. Invalid input raises rather than meaning 'today'."""
+    moment = normalize_timestamp(value)
+    return moment.date() if moment else None
+
+
+def _field(document: dict, key: str):
+    value = document.get(key)
     if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
+        metadata = document.get("metadata") or {}
+        value = metadata.get(key)
+    return value
+
+
+def _supersedes(document: dict) -> list[str]:
+    value = _field(document, "supersedes") or []
+    values = [value] if isinstance(value, str) else value
+    if not isinstance(values, (list, tuple)) or any(not isinstance(item, str) or not item for item in values):
+        raise ValueError("supersedes must be an event ID or a list of event IDs")
+    return list(dict.fromkeys(values))
 
 
 def build_validity_index(docs: list[dict]) -> dict[str, dict]:
-    """Build the validity map from a list of document dicts.
+    """Build explicit validity windows without altering source documents.
 
-    Each doc: {"id": str, "division": str, "text": str, "date": date|None}.
-    Returns: {doc_id: {"valid_from": iso|None, "valid_until": iso|None,
-                       "superseded_by": doc_id|None}}.
-
-    Algorithm:
-      1. Group docs by division, sort chronologically (undated first).
-      2. Maintain an entity -> set(doc_id) inverted index of docs seen so far.
-      3. For each doc with a correction signal, find older docs in the same
-         division sharing 2+ entities. Those get their window closed at this
-         doc's valid_from.
+    Unknown supersedes IDs remain unresolved references, never fuzzy matches.
+    Each closing record retains its own recorded/effective timestamps, so a
+    later-recorded correction cannot erase what was known before it arrived.
     """
-    from .entity_graph import extract_entities
-
-    validity: dict[str, dict] = {}
-
-    # Group by division
-    by_div: dict[str, list[dict]] = {}
-    for d in docs:
-        by_div.setdefault(d.get("division", ""), []).append(d)
-
-    for division, dlist in by_div.items():
-        # Chronological order. Undated docs sort last and stay always-valid:
-        # without a date we can neither close their window at a known point
-        # nor let them close others, so the conservative choice is to keep them.
-        def sort_key(d):
-            dt = _as_date(d.get("date"))
-            return (dt is None, dt or date.min)
-
-        ordered = sorted(dlist, key=sort_key)
-
-        # doc_id -> set of entities (lowercased for matching)
-        doc_entities: dict[str, set[str]] = {}
-        # entity -> set of doc_ids already processed (older docs)
-        entity_index: dict[str, set[str]] = {}
-        # doc_id -> date
-        doc_date: dict[str, date | None] = {}
-
-        for d in ordered:
-            doc_id = d["id"]
-            dt = _as_date(d.get("date"))
-            doc_date[doc_id] = dt
-            validity[doc_id] = {
-                "valid_from": dt.isoformat() if dt else None,
-                "valid_until": None,
-                "superseded_by": None,
-            }
-            ents = {e.lower() for e in extract_entities(d.get("text", ""))}
-            doc_entities[doc_id] = ents
-
-            # Supersede check: only docs WITH a date can close windows
-            # (we need a valid_from to close the old window at).
-            if dt is not None and _has_correction_signal(d.get("text", "")):
-                # Candidate older docs: share at least one entity
-                candidates: dict[str, int] = {}
-                for e in ents:
-                    for older_id in entity_index.get(e, ()): 
-                        candidates[older_id] = candidates.get(older_id, 0) + 1
-                for older_id, shared in candidates.items():
-                    if shared >= 2:
-                        old = validity[older_id]
-                        # Don't re-close an already-closed window; keep the
-                        # earliest supersession (first correction wins).
-                        if old["valid_until"] is None:
-                            old["valid_until"] = dt.isoformat()
-                            old["superseded_by"] = doc_id
-
-            # Index this doc for future (newer) docs
-            for e in ents:
-                entity_index.setdefault(e, set()).add(doc_id)
-
+    validity = {}
+    identities = {}
+    for document in docs:
+        identifier = document["id"]
+        if identifier in validity:
+            raise ValueError(f"Duplicate document ID in validity index: {identifier}")
+        effective = normalize_timestamp(_field(document, "valid_from"), field_name="valid_from")
+        if effective is None:
+            effective = normalize_timestamp(_field(document, "timestamp") or document.get("date"))
+        recorded = normalize_timestamp(_field(document, "recorded_at"), field_name="recorded_at")
+        if recorded is None:
+            recorded = normalize_timestamp(_field(document, "timestamp") or document.get("date")) or effective
+        validity[identifier] = {
+            "valid_from": effective.isoformat() if effective else None,
+            "recorded_at": recorded.isoformat() if recorded else None,
+            "valid_until": None,
+            "superseded_by": None,
+            "supersessions": [],
+        }
+        if identifier in identities and identities[identifier] != identifier:
+            raise ValueError(f"Document ID collides with event ID: {identifier}")
+        identities[identifier] = identifier
+        event_id = _field(document, "event_id")
+        if event_id:
+            if event_id in identities and identities[event_id] != identifier:
+                raise ValueError(f"Duplicate event ID in validity index: {event_id}")
+            identities[event_id] = identifier
+    for document in docs:
+        identifier = document["id"]
+        closing = validity[identifier]
+        effective = normalize_timestamp(closing["valid_from"])
+        if effective is None:
+            # Do not invent a point at which an undated correction took effect.
+            continue
+        for target in _supersedes(document):
+            older_id = identities.get(target)
+            if older_id is None or older_id == identifier:
+                continue
+            older = validity[older_id]
+            beginning = normalize_timestamp(older["valid_from"])
+            if beginning is not None and effective < beginning:
+                raise ValueError(f"Supersession predates target {target}")
+            older["supersessions"].append({
+                "valid_from": closing["valid_from"],
+                "recorded_at": closing["recorded_at"],
+                "superseded_by": identifier,
+            })
+    for entry in validity.values():
+        entry["supersessions"].sort(
+            key=lambda item: (item["valid_from"], item["recorded_at"] or "", item["superseded_by"])
+        )
+        if entry["supersessions"]:
+            earliest = entry["supersessions"][0]
+            entry["valid_until"] = earliest["valid_from"]
+            entry["superseded_by"] = earliest["superseded_by"]
     return validity
 
 
 def save_validity(validity: dict[str, dict], path: str = VALIDITY_PATH) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(validity, f)
+    """Atomically replace the derived index, preserving immutable source events."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".validity-", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(validity, output, ensure_ascii=False, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def load_validity(path: str = VALIDITY_PATH) -> dict[str, dict]:
     if not os.path.isfile(path):
         return {}
-    with open(path) as f:
-        return json.load(f)
+    with open(path, encoding="utf-8") as source:
+        return json.load(source)
 
 
-def is_valid(entry: dict, as_of: date | datetime | str | None) -> bool:
-    """True if the validity entry covers the as_of timestamp.
+def is_valid(entry: dict, as_of: date | datetime | str | None = None, *,
+             known_at: date | datetime | str | None = None) -> bool:
+    """Check a half-open [valid_from, valid_until) window at full precision.
 
-    as_of=None means "now". Undated valid_from (None) means always-valid
-    from the beginning of time.
+    ``as_of=None`` means now in UTC. Optional ``known_at`` additionally excludes
+    records and corrections not recorded by that timestamp. Invalid query
+    timestamps always raise ValueError, including an otherwise empty entry.
     """
-    moment = _as_date(as_of) or date.today()
-    vf = _as_date(entry.get("valid_from"))
-    vu = _as_date(entry.get("valid_until"))
-    if vf is not None and moment < vf:
+    moment = normalize_timestamp(as_of, field_name="as_of") or datetime.now(timezone.utc)
+    knowledge = normalize_timestamp(known_at, field_name="known_at")
+    beginning = normalize_timestamp(entry.get("valid_from"), field_name="valid_from")
+    recorded = normalize_timestamp(entry.get("recorded_at"), field_name="recorded_at")
+    if beginning is not None and moment < beginning:
         return False
-    if vu is not None and moment >= vu:
+    if knowledge is not None and recorded is not None and knowledge < recorded:
         return False
+    supersessions = entry.get("supersessions")
+    if supersessions is not None:
+        for correction in supersessions:
+            corrected_at = normalize_timestamp(correction.get("valid_from"))
+            learned_at = normalize_timestamp(correction.get("recorded_at"))
+            if knowledge is not None and learned_at is not None and knowledge < learned_at:
+                continue
+            if corrected_at is not None and moment >= corrected_at:
+                return False
+    else:
+        # Older persisted explicit-window indexes remain readable. Callers must
+        # rebuild legacy heuristic indexes before using authoritative recall.
+        ending = normalize_timestamp(entry.get("valid_until"), field_name="valid_until")
+        if ending is not None and moment >= ending:
+            return False
     return True
 
 
-def filter_valid(
-    doc_ids: list[str],
-    validity: dict[str, dict],
-    as_of: date | datetime | str | None = None,
-) -> list[str]:
-    """Keep only doc_ids whose validity window covers as_of (default now)."""
-    return [d for d in doc_ids if is_valid(validity.get(d, {}), as_of)]
+def filter_valid(doc_ids: list[str], validity: dict[str, dict],
+                 as_of: date | datetime | str | None = None, *,
+                 known_at: date | datetime | str | None = None) -> list[str]:
+    """Filter document IDs, validating query timestamps even for empty lists."""
+    moment = normalize_timestamp(as_of, field_name="as_of") or datetime.now(timezone.utc)
+    knowledge = normalize_timestamp(known_at, field_name="known_at")
+    return [identifier for identifier in doc_ids
+            if is_valid(validity.get(identifier, {}), moment, known_at=knowledge)]
 
 
-def validity_for(doc_id: str, validity: dict[str, dict]) -> dict:
-    """Return the validity entry for a doc (defaults to always-valid)."""
-    return validity.get(
-        doc_id, {"valid_from": None, "valid_until": None, "superseded_by": None}
-    )
+def validity_for(doc_id: str, validity: dict[str, dict], *,
+                 known_at: date | datetime | str | None = None) -> dict:
+    """Return validity metadata, optionally projected to knowledge available then.
+
+    A known-at query must not leak a later-recorded correction through returned
+    ``superseded_by`` metadata even when its effective date is backdated.
+    The persisted audit index is never changed by this projection.
+    """
+    entry = validity.get(doc_id, {
+        "valid_from": None, "recorded_at": None, "valid_until": None,
+        "superseded_by": None, "supersessions": [],
+    })
+    knowledge = normalize_timestamp(known_at, field_name="known_at")
+    if knowledge is None or "supersessions" not in entry:
+        return entry
+    result = dict(entry)
+    visible = [dict(correction) for correction in entry["supersessions"]
+               if (normalize_timestamp(correction.get("recorded_at")) is None
+                   or normalize_timestamp(correction.get("recorded_at")) <= knowledge)]
+    result["supersessions"] = visible
+    result["valid_until"] = visible[0]["valid_from"] if visible else None
+    result["superseded_by"] = visible[0]["superseded_by"] if visible else None
+    return result

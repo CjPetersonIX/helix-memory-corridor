@@ -2,7 +2,9 @@
 
 > 4-arm hybrid memory recall for AI agents. File-based, free, no
 > PostgreSQL, no LLM calls, no API keys. Your agent remembers what
-> matters, finds it fast, and never shows you a stale fact.
+> matters with explicit capture, fresh-source retrieval, and visible health receipts.
+> Version 0.3.0: follow [README](README.md) and [host integration](docs/INTEGRATION.md).
+> Installing this skill does not install provider capture/compaction hooks.
 
 ---
 
@@ -104,7 +106,7 @@ python scripts/build_index.py --memory-dir ~/memory [--no-semantic]
 python scripts/test_recall.py [--no-semantic]
 
 # Unit + integration tests
-python scripts/test_enhancements.py [--integration]
+python -m pytest -q
 ```
 
 ---
@@ -129,101 +131,24 @@ Example layout:
 
 ### Writing corrections
 
-When a fact changes, write a new section that references the old one.
-The bi-temporal validity tracker closes the old fact's window
-automatically when it detects correction language:
+Write a new immutable event with explicit `supersedes=[prior_event_id]` through
+`MemoryStore.remember`. Keep the original. Merely saying “updated” or sharing
+entity names does not invalidate a fact. Full effective and recorded timestamps
+are preserved; `as_of` and `known_at` select historical views.
 
-- "Corrected:"
-- "Update:"
-- "Superseded:"
-- "Previous value was X, now Y"
-
-`recall()` returns only currently-valid facts by default. Use
-`as_of="YYYY-MM-DD"` to query what was true at a past date.
+See [README](README.md) for tested capture/recall examples. Core recall defaults
+to no semantic model; embeddings require explicit opt-in.
 
 ---
 
 ## Google Drive as your memory mirror
 
-Your local folder stays the working copy. Drive holds an identical
-mirror. If your computer dies, your memories survive.
-
-```
-Local:  ~/memory/
-            ├── work/
-            ├── personal/
-            └── journal.md
-
-Drive:  My Drive/Memory/
-            ├── work/          (identical copy)
-            ├── personal/      (identical copy)
-            └── journal.md     (identical copy)
-```
-
-### Setup
-
-**1. Create the Drive folder**
-
-1. Go to [drive.google.com](https://drive.google.com)
-2. Click **New** → **New folder**, name it `Memory`
-3. Note the folder ID from the URL:
-   `https://drive.google.com/drive/folders/1ABC123xyz...`
-
-**2. Install rclone** (free, open source)
-
-```bash
-# Mac
-brew install rclone
-
-# Linux
-sudo apt install rclone
-```
-
-**3. Connect rclone to Google Drive**
-
-```bash
-rclone config
-```
-
-Follow the prompts: `n` for new remote, name it `gdrive`, choose
-`drive`, leave client ID/secret blank, choose full access, type `y`
-for auto config, sign in via browser, confirm.
-
-Test it: `rclone lsd gdrive:`
-
-**4. First sync**
-
-```bash
-rclone sync ~/memory gdrive:Memory --drive-root-folder-id YOUR_FOLDER_ID -v
-```
-
-### Daily use
-
-**Push changes:**
-```bash
-rclone sync ~/memory gdrive:Memory --drive-root-folder-id YOUR_FOLDER_ID
-```
-
-**Pull/restore:**
-```bash
-rclone sync gdrive:Memory ~/memory --drive-root-folder-id YOUR_FOLDER_ID
-```
-
-**Automate** (hourly via cron):
-```bash
-crontab -e
-# Add:
-0 * * * * /usr/bin/rclone sync ~/memory gdrive:Memory --drive-root-folder-id YOUR_FOLDER_ID --log-file ~/.rclone-memory.log
-```
-
-### Tips
-
-- **Exclude the index cache.** Don't sync `~/.helix-memory/`. It
-  rebuilds automatically. Only sync your source markdown files.
-- **Version history is free backup.** Drive keeps every version.
-  Right-click any file → **Manage versions** to restore.
-- **Use `copy` instead of `sync`** if you never want Drive deletions
-  to happen automatically.
+Use the [verified mirror protocol](docs/DRIVE-MIRROR.md). Include every canonical
+memory and handoff/state path. Immutable generations preserve exact bytes and
+history; current advances after full readback verification. Never use destructive
+sync or restore over live files. Local capture and verified remote persistence
+are separate receipts. No OAuth, cron, or hosted provider hooks are installed by
+this skill. Raw live database copying is refused; a consistent export is required.
 
 ---
 
@@ -292,6 +217,10 @@ truth. Update it, don't replace it.
 ```
 
 ### How your agent maintains it
+
+Integrate `MemoryStore.update_resume` with the existing renderer; preserve its
+marked block and use revision checks. Its prior bytes are retained. This is an
+explicit hook; HTML auto-refresh does not capture a conversation.
 
 1. **After every significant action**, the agent updates the handoff:
    - Move completed items to Done

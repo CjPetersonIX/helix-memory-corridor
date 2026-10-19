@@ -74,6 +74,8 @@ def ppr_rank(
     top_n: int = 50,
     alpha: float = 0.85,
     nx_graph=None,
+    *,
+    return_method: bool = False,
 ) -> list[tuple[str, float]]:
     """Rank documents by Personalized PageRank seeded from query entities.
 
@@ -84,18 +86,26 @@ def ppr_rank(
         alpha: PPR damping factor (0.85 standard).
         nx_graph: prebuilt networkx graph (from build_nx_graph); built on
             demand if None.
+        return_method: return (results, method) for truthful per-call diagnostics.
+            The default retains the legacy plain-list return value.
 
     Returns:
         [(doc_id, score)] sorted by score desc. Score = PPR stationary
         probability of the doc node x doc specificity.
     """
-    import networkx as nx
+    def result(values, method="ppr"):
+        return (values, method) if return_method else values
 
     seeds = [s for s in seed_entities if s in entity_graph.entities]
-    if not seeds:
-        return []
+    if not seeds or top_n <= 0:
+        return result([])
+    try:
+        import networkx as nx
 
-    G = nx_graph if nx_graph is not None else build_nx_graph(entity_graph)
+        G = nx_graph if nx_graph is not None else build_nx_graph(entity_graph)
+    except (ImportError, ModuleNotFoundError) as error:
+        entity_graph._ppr_fallback_reason = f"{type(error).__name__}: {error}"
+        return result(entity_graph.walk(seeds, max_docs=top_n), "walk-fallback")
 
     personalization = {}
     mass = 1.0 / len(seeds)
@@ -106,15 +116,18 @@ def ppr_rank(
             # are more discriminative anchors.
             personalization[node] = mass * _entity_specificity(entity_graph, s)
     if not personalization:
-        return []
+        return result([])
     # Renormalize so the personalization vector sums to 1
     total = sum(personalization.values())
     personalization = {k: v / total for k, v in personalization.items()}
 
     try:
         scores = nx.pagerank(G, alpha=alpha, personalization=personalization, weight="weight")
-    except Exception:
-        return []
+    except Exception as error:
+        # Modern networkx also needs SciPy for pagerank. A dependency failure
+        # must not silently erase an otherwise working graph retrieval arm.
+        entity_graph._ppr_fallback_reason = f"{type(error).__name__}: {error}"
+        return result(entity_graph.walk(seeds, max_docs=top_n), "walk-fallback")
 
     # Extract document nodes, apply specificity weighting
     doc_scores: list[tuple[str, float]] = []
@@ -132,4 +145,4 @@ def ppr_rank(
         doc_scores.append((doc_id, pr * spec))
 
     doc_scores.sort(key=lambda x: x[1], reverse=True)
-    return doc_scores[:top_n]
+    return result(doc_scores[:top_n])

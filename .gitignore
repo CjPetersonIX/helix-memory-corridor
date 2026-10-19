@@ -41,3 +41,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Current derived state and local memory must never be published
+.helix-memory/
+.helix-state/
+.helix-history/

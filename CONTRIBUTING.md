@@ -13,7 +13,8 @@ Open a GitHub issue with:
 1. Fork the repo
 2. Create a branch: `git checkout -b fix/description`
 3. Make your changes
-4. Run the tests: `python scripts/test_enhancements.py`
+4. Install dev dependencies (`python -m pip install ".[dev]"`) and run
+   `python -m pytest -q`, then `python scripts/test_recall.py --no-semantic`
 5. Ensure no private info in your changes (see below)
 6. Open a pull request
 
