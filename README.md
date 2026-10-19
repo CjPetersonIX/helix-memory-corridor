@@ -1,168 +1,157 @@
 # Helix Memory Corridor
 
-4-arm hybrid memory recall for AI agents, enhanced with bi-temporal validity,
-Personalized PageRank, and multiplicative re-ranking.
-File-based, free, no PostgreSQL, no LLM calls, no API keys.
+Durable agent-memory capture, fresh hybrid recall, explicit corrections, resume
+state, and verified non-deleting backup generations. Free, local-first, Python
+3.10+. No LLM calls or API keys on the core path.
 
-> **Start here:** [`helix-memory-corridor-master-skill.md`](helix-memory-corridor-master-skill.md)
-> is the all-in-one guide. It covers installation, usage, Google Drive
-> memory mirroring, and the Living Handoff pattern. Everything below is
-> a summary.
+Repair authored by [R2] SRVP2-CODEX. Original source/history is retained in Git.
+Version 0.3.0 repairs the incomplete category migration in the earlier public
+release. See [CHANGELOG](CHANGELOG.md).
 
-## Why this exists
-
-AI agents forget. Context windows compact, sessions end, and yesterday's
-decisions vanish. If you store durable memory as structured markdown files
-(decision logs, journal entries, project notes), plain keyword search misses
-too much: paraphrases, related concepts, time-bounded questions, and,
-critically, *which version of a corrected fact is current*.
-
-The Helix Memory Corridor adds hybrid retrieval on top of your memory files:
-
-1. **Semantic** — vector search finds paraphrases and conceptual matches
-2. **BM25** — keyword search finds exact terms and names
-3. **Graph** — Personalized PageRank over the entity graph, seeded from query
-   entities and weighted by node specificity. Finds multi-hop connections
-   through shared people, projects, and systems
-4. **Temporal** — date-window filter boosts documents inside a detected time
-   range ("last week", "in October", "since Monday")
-
-Plus:
-- **Bi-temporal validity** (Graphiti-style): corrections close the old fact's
-  validity window. `recall()` defaults to "what's true now".
-- **Multiplicative re-rank** (mem0-style):
-  `final = rrf x importance x recency_decay`.
-
-No single arm is sufficient. Semantic misses exact keywords. BM25 misses
-paraphrases. The graph finds connections neither sees. Temporal cuts noise.
-Reciprocal Rank Fusion combines them:
-
-```
-score(d) = sum_over_arms( 1 / (60 + rank(d)) )
-```
-
-Documents appearing in multiple arms outrank documents that are #1 in only
-one arm. See `docs/ARCHITECTURE.md` for the full design.
-
-## Install
+## Install and run
 
 ```bash
-pip install git+https://github.com/CjPetersonIX/helix-memory-corridor.git
+python -m pip install .
+hmc --help
+hmc doctor --memory-dir ~/memory
 ```
 
-For the semantic (vector) arm, also install the heavy optional deps
-(~2GB, CPU-only torch is fine):
+`python -m helix_memory` is the same CLI. Semantic models are **opt-in**; core
+recall never downloads a model. Install `.[semantic]` only if wanted. `.[graph]`
+adds SciPy for full NetworkX PageRank; without it, graph walk is an explicit,
+reported fallback. Linux/macOS file locking protects cooperating local writers.
 
-```bash
-pip install "helix-memory-corridor[semantic] @ git+https://github.com/CjPetersonIX/helix-memory-corridor.git"
-```
-
-Without the semantic deps, `recall()` still works with BM25 + graph +
-temporal arms. The semantic arm degrades gracefully.
-
-## Quickstart
+## Save first, then recall
 
 ```python
-from helix_memory import recall, build_index
+from helix_memory import MemoryStore, recall, latest_events
 
-# First run: index your memory directory (takes a minute or two)
-# Point it at any folder of markdown files
-build_index(memory_dir="~/memory")
+store = MemoryStore("~/memory")
+receipt = store.remember(
+    "Project Orion uses the blue design. Next: review the draft.",
+    area="work", actor="[R2] EXAMPLE-AGENT", task_id="orion-design",
+    idempotency_key="orion-design-decision-1",
+    metadata={"status": "reported", "source": "conversation-message-123"},
+)
+assert receipt["durable"] and receipt["readback_verified"]
 
-# Ask about prior work
-results = recall("What did the team decide about the project timeline?")
-for r in results:
-    print(f"#{r.rrf_rank} score={r.rrf_score:.4f} {r.id}")
-    print("   arms:", r.source_ranks)   # which arms found it, at which rank
-    print("   " + r.text[:200])
+result = recall("Orion design", memory_dir="~/memory", return_diagnostics=True)
+print(result["results"])
+print(result["diagnostics"])
+print(latest_events(memory_dir="~/memory", task_id="orion-design"))
 ```
 
-More options:
-
-```python
-# Restrict to one category
-recall("Project approval status", category="work")
-
-# Skip the embedding model (faster, no torch)
-recall("Budget review", include_semantic=False)
-
-# Dedup mode: find near-duplicates (uses interleave fusion so each arm's
-# top hit is guaranteed a slot — ideal for consolidation). Validity filter
-# and re-rank are skipped: the goal is finding the old twin, even superseded.
-recall("new memory text...", dedup_mode=True)
-
-# Bi-temporal query: what was true on Oct 1?
-recall("Project budget", as_of="2026-10-01")
-
-# Skip the multiplicative re-rank (pure RRF order)
-recall("Project status", rerank=False)
-
-# Rebuild after many new files land
-build_index()
-```
-
-## CLI
+Events are immutable Markdown with structured metadata and full author identity.
+A repeated idempotency key returns the existing event; changed content under
+that key raises an error. Capture and readback are explicit operations: your
+agent host must invoke them after meaningful decisions, corrections, results,
+and task transitions. This package cannot intercept a hosted chat by itself.
 
 ```bash
-# Build/rebuild all indexes
-python scripts/build_index.py [--no-semantic] [--categories work,personal]
-
-# Smoke-test recall on real data
-python scripts/test_recall.py [--no-semantic]
-
-# Unit + integration tests for validity, PPR, re-rank
-python scripts/test_enhancements.py [--integration]
+hmc remember --memory-dir ~/memory --area work \
+  --actor '[R2] EXAMPLE-AGENT' --task-id orion-design \
+  --idempotency-key orion-design-decision-1 \
+  --text 'Project Orion uses the blue design. Next: review the draft.'
+hmc 'What is the Orion design?' --memory-dir ~/memory
+hmc latest --memory-dir ~/memory --task-id orion-design
+hmc index --memory-dir ~/memory --categories work --no-semantic
 ```
 
-## How it works
+`category`, `categories`, `division`, and `divisions` are compatible API scope
+aliases. Conflicting selections raise an error. The collector includes root
+Markdown and category subdirectories, with stable IDs and explicit source paths.
+HTML/JSON handoff data uses the separate resume interface rather than silently
+being treated as Markdown.
 
-| Module | Job |
-|---|---|
-| `collector.py` | Walks your memory directory, splits files on H2 sections |
-| `bm25_index.py` | Keyword index via `rank-bm25`, cached as JSON |
-| `semantic_index.py` | `all-MiniLM-L6-v2` embeddings + ChromaDB, one collection per category |
-| `entity_graph.py` | File-based co-occurrence graph, heuristic entity extraction, no deps |
-| `ppr_ranking.py` | Personalized PageRank + node specificity (HippoRAG-style) |
-| `temporal_filter.py` | Date extraction from queries, 30-day decay scoring |
-| `temporal_validity.py` | Bi-temporal validity windows (Graphiti-style) |
-| `fusion.py` | RRF + interleave fusion + per-arm caps (ported from Hindsight) |
-| `recall.py` | Runs 4 arms in parallel threads, validity filter, re-rank, top-k |
+## Corrections retain the original
 
-Indexes cache under `~/.helix-memory/` (rebuilt on demand, never committed).
+```python
+correction = store.remember(
+    "Project Orion now uses the green design.", area="work",
+    actor="[R2] EXAMPLE-AGENT", task_id="orion-design", kind="correction",
+    supersedes=[receipt["event_id"]], idempotency_key="orion-design-decision-2",
+)
+```
 
-Design notes:
+Only explicit `supersedes` IDs close an earlier fact. Shared names or words such
+as “updated” never invalidate unrelated records. Keep a correction in its
+subject's category; a category-scoped query cannot see corrections stored
+outside that scope. Full-corpus recall sees all available correction records.
 
-- RRF constant k=60 (Cormack et al., via Hindsight). Don't tune it.
-- Per-arm cap (default 25) before fusion stops one arm crowding out the rest.
-- Temporal arm abstains when the query has no date constraint.
-- We deliberately skip: PostgreSQL, LLM-per-write, cross-encoder reranking,
-  and heavyweight entity resolution. Structured markdown is already clean;
-  the retrieval was the gap, not the write path.
+`as_of="2026-10-18T10:00:00-07:00"` queries effective time; `known_at` optionally
+limits what had been recorded by that time. Use explicit offsets. Date-only and
+legacy filename times use documented UTC boundaries; new captures always carry
+UTC timestamps. Historical undated records stay undated, not silently current.
 
-## Memory file format
+## Resume without repeating work
 
-The collector expects markdown files organized however you like. It splits
-on H2 (`##`) headers. Each section becomes a retrievable document with:
+Keep one existing handoff HTML file. `MemoryStore.update_resume(path, state,
+expected_revision=...)` adds/updates only its marked Resume block and preserves
+previous bytes as content-addressed history. `read_resume(path)` restores the
+goal, last verified step, evidence, next action, blocker, approvals, and event ID.
+The content is data, never an execution or authorization grant.
 
-- The section text
-- Its source file path and header
-- Any dates found in the text (for temporal filtering)
-- Entities extracted from capitalized phrases (for graph building)
+```bash
+hmc resume set --memory-dir ~/memory --handoff /path/Living_Handoff.html \
+  --actor '[R2] EXAMPLE-AGENT' --task-id orion-design --goal 'Finish Orion design' \
+  --last-verified-step 'Decision saved and read back' --next-step 'Review draft' \
+  --expected-revision 0
+hmc resume show --memory-dir ~/memory --handoff /path/Living_Handoff.html
+```
 
-Corrections work by writing a new section that references the old one.
-The bi-temporal validity tracker closes the old fact's window automatically
-when it detects correction language ("corrected:", "update:", "superseded").
+The handoff must already exist. All writers, including its renderer, must
+preserve the marked block and coordinate revision updates. Local locks do not
+fence unrelated writers or provide distributed fleet coordination.
 
-## Attribution
+## Freshness and search health
 
-The 4-arm retrieval architecture and RRF fusion are adapted from
-[Hindsight](https://github.com/vectorize-io/hindsight) by Vectorize.
-Personalized PageRank retrieval adapts [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG)
-(OSU NLP Group). Bi-temporal validity edges adapt
-[Graphiti](https://github.com/getzep/graphiti) (Zep). The multiplicative
-re-rank pattern follows [mem0](https://github.com/mem0ai/mem0).
-See `docs/HINDSIGHT_CREDIT.md`.
+Every recall rereads source content and fingerprints the selected corpus.
+Appending or changing a memory invalidates cached relevance state. Four arms
+(keyword, graph, time, and optional semantic) use RRF fusion; returned text is
+hydrated from that current snapshot, not stale cached excerpts. Full matching
+text, source paths, generation and arm-health diagnostics accompany results.
 
-## License
+`latest_events()` reads source events directly for current-task recovery.
+A missing directory or failed arm is reported as degraded. An empty result does
+not prove that an event was never recorded. Capture receipts establish durable
+storage, not that the source assertion is independently true.
 
-MIT. See `LICENSE`.
+Optional semantic indexing preserves separate generations. It uses its own
+Chroma store; **it is not automatically connected to MemPalace**. Models and
+optional dependencies are not needed for capture, core recall, or restore.
+
+## Exact memory mirror
+
+See [Drive mirror](docs/DRIVE-MIRROR.md). Include every canonical memory path,
+including out-of-tree handoff and planning state. The mirror preserves complete
+immutable generations, relative paths, empty directories, bytes and SHA256
+manifests. Current advances only after full readback verification; prior
+generations remain available. No destructive sync/delete/purge operations.
+
+Live databases are refused: obtain a supported consistent export first.
+The package does not install OAuth, a cron job, or a provider capture hook.
+A successful local save and a verified Drive save are separate states.
+
+## Verification
+
+```bash
+python -m pip install '.[dev]'
+python -m pytest -q
+python scripts/test_recall.py --no-semantic
+python scripts/test_enhancements.py
+```
+
+Tests use synthetic data and isolated directories. No personal memories, live
+Drive, paid services, or model downloads are required. Optional semantic tests
+use explicitly identified fakes; they are not live backend benchmarks. Models
+have finite input windows; keep individual events small for semantic coverage.
+
+See [architecture](docs/ARCHITECTURE.md) and [integration](docs/INTEGRATION.md).
+
+## Attribution and license
+
+RRF/four-arm design adapts [Hindsight](https://github.com/vectorize-io/hindsight).
+Graph ranking adapts [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG);
+validity concepts reference [Graphiti](https://github.com/getzep/graphiti);
+reranking references [mem0](https://github.com/mem0ai/mem0). See
+[attribution](docs/HINDSIGHT_CREDIT.md) and the MIT [LICENSE](LICENSE).

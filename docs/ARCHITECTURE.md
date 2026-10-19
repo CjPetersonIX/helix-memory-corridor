@@ -1,161 +1,63 @@
-# Architecture: 4-Arm Hybrid Retrieval
+# Architecture and boundaries
 
-## The problem
+Authored by [R2] SRVP2-CODEX. Source events are evidence; indexes and rendered
+handoffs are projections. Memory content does not grant execution authority.
 
-A single retrieval method is never enough for agent memory:
+1. `MemoryStore.remember` exclusively creates an immutable Markdown event,
+   fsyncs it, reads it back, and updates an idempotency lookup under a local lock.
+   Interrupted lookup updates can recover from the event, without duplication.
+2. `collector` reads root Markdown and recursively scoped categories. Explicit
+   event IDs and stable section anchors prevent ordinal-ID drift. Records carry
+   source paths, full text, precise timestamps and explicit correction targets.
+3. `recall` rereads the corpus every call. Its content-and-scope generation keys
+   bounded caches, so warm indexes cannot hide an appended fact. Keyword,
+   graph, time and opt-in semantic scores are fused with RRF. Candidate text is
+   always hydrated from this call's source snapshot. Large returned passages
+   should be budgeted by the integrating host, without dropping the matched fact.
+4. `temporal_validity` resolves only explicit supersedes IDs. Effective time and
+   recorded time are separate; `known_at` prevents future-recorded corrections
+   leaking into a historical view. Naive legacy times use UTC. New captures
+   require an explicit offset. Undated evidence remains undated.
+5. `latest_events` bypasses optional indexes and returns newest exact-task events
+   for recovery. `MemoryStore.read_resume` restores the marked JSON block in
+   the single existing handoff. Neither function executes its text.
+6. `mirror` captures a complete immutable generation, hashes it, verifies copied
+   bytes, and advances a current pointer after verification. Local and remote
+   receipts are separate. Prior generations are preserved.
 
-- **Keyword search** misses paraphrases ("cert grind" vs "certification progress").
-- **Vector search** misses exact names and IDs ("AGENT-01", "doc-abc123").
-- Neither finds **related** memories that share entities but not wording.
-- Neither handles **"what happened last week?"** without a date filter.
+## Retrieval details
 
-## The four arms
+- BM25 handles empty/tiny corpora and supplements zero/negative scores for exact
+  token matches. Cache manifests include full source content and scope.
+- Graph relations are text co-occurrence, not evidence of agent activity or
+  actual memory traversal. PPR uses NetworkX+SciPy when available and reports
+  graph-walk fallback otherwise.
+- Time windows score dated candidates; exact validity and recency use full
+  timestamps. A time-only query is not a semantic proof of relevance.
+- Semantic models are opt-in. Generation-specific Chroma collections preserve
+  old derived state; the source snapshot, not a cached excerpt, supplies text.
+  No MemPalace bridge is included.
+- RRF uses k=60. Importance and 180-day recency reranking are retained. Immediate
+  recovery uses latest events rather than relying on a small relevance boost.
+- Missing roots/scopes and failed arms have explicit health diagnostics. An
+  empty result cannot establish that no memory exists.
 
-All four run in parallel (threads) on every `recall()` call. Each returns a
-ranked list of `RetrievalResult(id, text, score, source, metadata)`.
+## Concurrency, performance, and limits
 
-### 1. Semantic arm (`semantic_index.py`)
+Content validation favors correctness over mtime-only shortcuts. Large corpora
+may need a journal-driven incremental collector later; measure before adding
+complexity. Cache scope is per resolved root/category/options/generation.
 
-- Embeddings: `sentence-transformers` `all-MiniLM-L6-v2` (384 dims, CPU-friendly,
-  ~90MB model downloaded once and cached).
-- Storage: ChromaDB persistent client, one collection per HELIX division,
-  cosine space. Lives under `~/.helix-memory/chroma/`. No server, no PostgreSQL.
-- Query: embed the query, cosine-search each division collection, merge.
-- Abstains gracefully when deps aren't installed (arm returns `[]`).
+Local locks/CAS coordinate cooperating Linux/macOS writers. They do not fence
+unrelated handoff renderers, replicate fleet state, or establish a global lock.
+A hosted conversation must call capture and recovery explicitly. Installing a
+skill or this package does not inject it into a provider's context window.
 
-### 2. BM25 arm (`bm25_index.py`)
+Markdown is indexed. HTML/JSON handoff state uses explicit resume/state APIs.
+Category-scoped queries only see corrections in that scope; keep corrections
+with their subject, or query the whole corpus. Legacy heuristic validity caches
+are not reused as current truth. Originals remain in place.
 
-- `rank-bm25` (pure Python) over tokenized qpulse sections.
-- Tokenizer: lowercase alphanumeric tokens, 2+ chars.
-- Index cached as JSON (`~/.helix-memory/bm25-index.json`): tokenized corpus +
-  doc IDs. Texts are re-read from source files on load so content stays fresh.
-- Oversamples 3x before the division filter so filtered results stay full.
-
-### 3. Graph arm (`entity_graph.py` + `ppr_ranking.py`)
-
-- Zero heavy dependencies (`networkx` is pure Python). Entities extracted
-  heuristically:
-  - Multi-word capitalized phrases: "Project Alpha", "Team Beta"
-  - ALL-CAPS tokens: "ADMIN", "AGENT-01", "MEMORY"
-  - Quoted phrases: "the morning brief"
-- Edges are co-occurrence links: two entities in the same document get an
-  undirected edge weighted by co-occurrence count.
-- Retrieval: **Personalized PageRank** (HippoRAG-style). Query substrings
-  match entities (case-insensitive); those become PPR seed nodes on a
-  bipartite entity+document graph. Damping 0.85. Documents ranked by
-  stationary probability x **node specificity** (`1 / log(1 + degree)`),
-  so rare entities count more than hub entities like "IX".
-- Falls back to the 1-2 hop BFS walk if `networkx` is unavailable.
-- Storage: one JSON file per division (`graph-<division>.json`).
-
-### 4. Temporal arm (`temporal_filter.py`)
-
-- Query time: detect temporal constraints —
-  explicit dates (`2026-10-10`, `Oct 10`), relative (`yesterday`, `last week`,
-  `past 30 days`, `since Monday`), month names (`in October`) via regex +
-  `dateparser` fallback.
-- Index time: dates parsed from qpulse filenames (`2026-10-10-1030-hourly.md`).
-- Scoring: inside the window = 1.0, outside decays over 30 days, undated = 0.5.
-- **Abstains** (returns `[]`) when the query has no temporal constraint.
-
-## Fusion (`fusion.py`)
-
-### Reciprocal Rank Fusion (default)
-
-Ported from Hindsight's `engine/search/fusion.py`:
-
-```python
-score(d) = sum_over_arms( 1 / (k + rank(d)) )   # k = 60
-```
-
-Why RRF instead of score averaging: the four arms produce incomparable raw
-scores (cosine similarity vs BM25 vs graph weight vs temporal decay). Ranks
-are the common currency. A document ranked #2 in three arms
-(3 x 1/62 = 0.048) beats a document ranked #1 in one arm only (1/61 = 0.016).
-Consensus wins. k=60 per Cormack et al.; Hindsight uses the same value.
-
-Before fusion, `cap_per_source()` truncates each arm (default 25) so one
-over-expanding arm can't crowd out the others in the merged pool.
-
-### Interleave fusion (dedup mode)
-
-Round-robin: arm 0 rank 1, arm 1 rank 1, arm 2 rank 1, arm 3 rank 1, then all
-rank 2s, de-duplicating. Guarantees every arm's top hit a slot.
-
-Why: for dedup (finding the near-identical existing memory to merge into),
-RRF has a failure mode — the "twin" is semantic #1 but shares little lexical
-overlap, so RRF averages it down below the cutoff and the writer creates a
-duplicate. Interleave never buries an arm's #1. (This insight is also from
-Hindsight's `interleave_fusion`, used in their consolidation path.)
-
-## Post-processing
-
-Two post-fusion stages run after RRF (skipped in `dedup_mode`, where the
-goal is finding the old twin even if superseded):
-
-### Bi-temporal validity filter (`temporal_validity.py`, Graphiti-style)
-
-Every memory carries `valid_from` / `valid_until`. When a new qpulse entry
-in the same division shares 2+ entities with an older memory AND contains a
-correction keyword ("corrected", "supersedes", "replaces", "updated",
-"was wrong", ...), the old window closes at the new entry's date.
-
-`recall()` takes `as_of` (date/datetime/ISO string, default = now) and
-drops candidates whose window doesn't cover it. Corrections automatically
-hide superseded facts; pass an old date to ask "what was true then".
-
-Validity index cached at `~/.helix-memory/validity.json`, rebuilt by
-`build_index()`.
-
-### Multiplicative re-rank (mem0-style)
-
-```
-final_score = rrf_score x importance x recency_decay
-importance    = 1 + log(1 + distinct_entity_count)
-recency_decay = exp(-age_days / 180)
-```
-
-A correction from today beats a status update from last month even if the
-old one ranked higher semantically. Undated docs get recency 1.0 (no
-penalty). Components are stamped into result metadata
-(`importance`, `recency_decay`, `final_score`, `final_rank`).
-Disable with `rerank=False`.
-
-## Data flow
-
-```
-recall("What did IX decide about crypto?")
-  |
-  +-- ThreadPoolExecutor (4 workers)
-  |     |-- semantic: embed query -> chroma cosine -> top 25
-  |     |-- bm25:     tokenize -> BM25Okapi scores -> top 25
-  |     |-- graph:    query entities -> PPR seeds -> top 25
-  |     +-- temporal: extract window -> date scoring -> top 25 (or abstain)
-  |
-  +-- cap_per_source(each arm, 25)
-  +-- reciprocal_rank_fusion([semantic, bm25, graph, temporal])
-  +-- validity filter (as_of=now; skipped in dedup_mode)
-  +-- multiplicative re-rank (skipped in dedup_mode / rerank=False)
-  +-- return top_k MergedCandidate(id, text, rrf_score, rrf_rank,
-                                  source_ranks, arm_scores, metadata)
-```
-
-## What we deliberately skip (vs Hindsight)
-
-| Hindsight component | Why we skip it |
-|---|---|
-| PostgreSQL + pgvector + pg_trgm + pg_search | ChromaDB + rank-bm25 + JSON files are free and local |
-| LLM per write (fact extraction) | HELIX qpulse entries are already structured; extraction is the cost center we don't need |
-| Cross-encoder reranking | v1 ships without it; add if recall quality proves insufficient |
-| 1,659-line entity resolver | Our data doesn't have ambiguous-entity problems |
-| Consolidation/dedup engine | `dedup_mode` covers the 80% case with interleave fusion |
-| MCP server, multi-provider LLM abstraction | Not needed for a retrieval library |
-
-## Index lifecycle
-
-- First `recall()` or `build_index()` builds and caches everything under
-  `~/.helix-memory/`.
-- BM25 cache stores tokenized corpus; texts re-read from source on load.
-- ChromaDB persists vectors; rebuild clears stale entries per collection.
-- Graphs rebuild from scratch (fast: heuristic extraction, no models).
-- Rebuild when recall feels stale (new qpulse files land hourly).
+No conical renderer, geometric storage layout, traversal-strengthened veins,
+automatic authorization ledger, or autonomous scheduler is implied by these
+retrieval primitives. Those require separately reviewed integration.

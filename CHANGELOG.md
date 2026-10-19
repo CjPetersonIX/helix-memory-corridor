@@ -2,6 +2,21 @@
 
 All notable changes to the Helix Memory Corridor public release.
 
+## [0.3.0] — retention repair (review branch)
+
+Authored by [R2] SRVP2-CODEX. The previous public changelog said 1.0.0 while
+package metadata actually reported 0.2.0; package metadata is now consistent.
+
+- Repair category/division aliases across collection, indexes, recall and CLI.
+- Validate source content/scopes on recall; include root memories and full text.
+- Replace heuristic fact suppression with explicit timestamped supersession.
+- Add durable idempotent events, handoff resume/CAS and verified readback.
+- Add immutable non-deleting mirror generations, pending receipts and restore.
+- Provide installed hmc CLI and optional reported PPR fallback.
+- Add synthetic regression/integration tests; semantic backend tests use fakes.
+- Preserve existing source memory and prior versions. Hosted hooks and live
+  Drive deployment remain separate integration steps.
+
 ## [1.0.0] — 2026-10-11
 
 Initial public release. Sanitized from the private BrainFrame HELIX
