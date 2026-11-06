@@ -148,6 +148,10 @@ have finite input windows; keep individual events small for semantic coverage.
 
 See [architecture](docs/ARCHITECTURE.md) and [integration](docs/INTEGRATION.md).
 
+## White papers
+
+1. [The Helix Memory Corridor: A File Based Hybrid Memory System for Persistent AI Agents](docs/whitepaper/helix-memory-corridor-whitepaper.md): the full system paper, covering the corpus, event layer, validity, retrieval, operations, and the proposed 0.3.2 trace layer.
+
 ## Attribution and license
 
 RRF/four-arm design adapts [Hindsight](https://github.com/vectorize-io/hindsight).
